@@ -1,0 +1,126 @@
+apply plugin: 'com.android.library'
+// Pinned source and binaries; override when embedding this folder in another host.
+def hostApplicationId = providers.gradleProperty('termuxX11.applicationId').getOrElse('com.bat.linuxapps')
+def termuxX11VersionName = '1.03.01-8d536db-06.10.26'
+def termuxX11NdkVersion = '29.0.14206865'
+def buildNative = providers.gradleProperty('termuxX11.buildNative').getOrElse('false').toBoolean()
+
+android {
+    namespace 'com.termux.x11'
+    //noinspection GrDeprecatedAPIUsage
+    compileSdkVersion 37
+    ndkVersion termuxX11NdkVersion
+    defaultConfig {
+        minSdkVersion 26
+        targetSdkVersion 37
+        buildConfigField "String", "VERSION_NAME", "\"${termuxX11VersionName}\""
+        buildConfigField "String", "COMMIT", "\"" + "8d536db2e28f2a7c0153f5b7de63da38c1ba5f8c" + "\""
+        buildConfigField "String", "APPLICATION_ID", "\"${hostApplicationId}\""
+
+        consumerProguardFiles 'proguard-rules.pro'
+    }
+
+    compileOptions.sourceCompatibility JavaVersion.VERSION_17
+    compileOptions.targetCompatibility JavaVersion.VERSION_17
+    if (buildNative) {
+        externalNativeBuild.cmake.path "src/main/cpp/CMakeLists.txt"
+        sourceSets.main.jniLibs.srcDirs = []
+    }
+    defaultConfig.ndk.abiFilters.addAll(['arm64-v8a', 'armeabi-v7a'])
+    packagingOptions.jniLibs.useLegacyPackaging false
+    buildFeatures.aidl true
+    buildFeatures.buildConfig true
+}
+
+// Upstream hidden Android framework stubs are compile-only and never enter the APK.
+def compileFrameworkStubs = tasks.register('compileFrameworkStubs', JavaCompile) {
+    source fileTree('compile-stubs') { include '**/*.java' }
+    classpath = files(androidComponents.sdkComponents.bootClasspath)
+    destinationDirectory.set(layout.buildDirectory.dir('framework-stubs/classes'))
+    sourceCompatibility = '17'
+    targetCompatibility = '17'
+}
+tasks.register('frameworkStubJar', Jar) {
+    from compileFrameworkStubs
+    archiveFileName.set('framework-stubs.jar')
+    destinationDirectory.set(layout.buildDirectory.dir('framework-stubs'))
+}
+
+dependencies {
+    //noinspection DifferentStdlibGradleVersion
+
+    api 'androidx.preference:preference:1.2.1'
+    compileOnly files(tasks.named('frameworkStubJar'))
+}
+afterEvaluate {
+    tasks.register("generatePrefs") {
+        //noinspection UnnecessaryQualifiedReference
+        def xml = groovy.xml.DOMBuilder.parse((new StringReader(file('src/main/res/xml/preferences.xml').text)))
+        def preferenceNodes = xml.documentElement.getElementsByTagName("*")
+        def preferences = []
+
+        for (int i = 0; i < preferenceNodes.length; i++) {
+            def node = preferenceNodes.item(i)
+            if (node.nodeName == 'EditTextPreference' && node.getAttribute("app:key") != "extra_keys_config")
+                preferences << [ type: 'String',  key: node.getAttribute("app:key"), default: node.getAttribute("app:defaultValue") ]
+            else if (node.nodeName == 'SeekBarPreference')
+                preferences << [ type: 'Int', key: node.getAttribute("app:key"), default: node.getAttribute("app:defaultValue") ]
+            else if (node.nodeName == 'ListPreference') {
+                def entries = node.getAttribute("app:entries")
+                def values = node.getAttribute("app:entryValues")
+                preferences << [type: 'List', key: node.getAttribute("app:key"), default: node.getAttribute("app:defaultValue"),
+                                entries: entries.substring(7, entries.length()), values: values.substring(7, values.length())]
+            }
+            else if (node.nodeName == 'SwitchPreferenceCompat')
+                preferences << [ type: 'Boolean',  key: node.getAttribute("app:key"), default: node.getAttribute("app:defaultValue") ]
+        }
+
+        def out = file('build/generated/java/com/termux/x11/Prefs.java')
+        out.getParentFile().exists() || out.getParentFile().mkdirs()
+        out.delete()
+        out.createNewFile()
+
+        out << 'package com.termux.x11;\n'
+        out << 'import java.util.HashMap;\n'
+        out << 'import android.content.Context;\n'
+        out << 'import android.content.SharedPreferences;\n'
+        out << 'import com.termux.x11.utils.TermuxX11ExtraKeys;\n'
+        out << '\n'
+        out << 'public class Prefs extends LoriePreferences.PrefsProto {\n'
+        preferences.each {
+            if (it.type == 'Int' || it.type == 'Boolean')
+                out << "  public final ${it.type}Preference ${it.key} = new ${it.type}Preference(\"${it.key}\", ${it.default});\n"
+            else if (it.type == 'String')
+                out << "  public final StringPreference ${it.key} = new StringPreference(\"${it.key}\", \"${it.default}\");\n"
+            else if (it.type == 'List')
+                out << "  public final ${it.type}Preference ${it.key} = new ${it.type}Preference(\"${it.key}\", \"${it.default}\", R.array.${it.entries}, R.array.${it.values});\n"
+        }
+        out << '  public final StringPreference extra_keys_config = new StringPreference("extra_keys_config", TermuxX11ExtraKeys.DEFAULT_IVALUE_EXTRA_KEYS);\n'
+        out << '  public final HashMap<String, Preference> keys = new HashMap<>() {{\n'
+        preferences.each { out << '    put("' + it.key + '", ' + it.key + ');\n' }
+        out << '    put("extra_keys_config", extra_keys_config);\n'
+        out << '  }};\n'
+        out << '\n'
+        out << '  public Prefs() {}\n'
+        out << '\n'
+        out << '  @Override\n'
+        out << '  public void attach(Context ctx, SharedPreferences preferences) {\n'
+        out << '    super.attach(ctx, preferences);\n'
+        out << '    Object legacyKeepScreenOn = preferences.getAll().get("keepScreenOn");\n'
+        out << '    if (legacyKeepScreenOn instanceof Boolean && !preferences.contains("screenIdleTimeout"))\n'
+        out << '      preferences.edit().putString("screenIdleTimeout", (Boolean) legacyKeepScreenOn ? "never" : "system").commit();\n'
+        out << '  }\n'
+        out << '}\n'
+    }
+    android.sourceSets.main.java.srcDirs += 'build/generated/java'
+    preBuild.dependsOn generatePrefs
+
+    tasks.register("generateShortcuts") {
+        def out = file('build/generated/templateRes/xml/lorie_shortcuts.xml')
+        out.getParentFile().exists() || out.getParentFile().mkdirs()
+        out.text = file('src/main/templates/xml/shortcuts.xml').text
+                .replace('@@APPLICATION_ID@@', hostApplicationId)
+    }
+    android.sourceSets.main.res.srcDirs += 'build/generated/templateRes'
+    preBuild.dependsOn generateShortcuts
+}

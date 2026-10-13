@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="lorie_bundled_help">Return to the Linux Apps home screen and tap Open desktop to start or reconnect to your desktop.\n\nDuring a session, swipe up with three fingers or tap the gear key in the additional keys toolbar to open Preferences. If you changed the swipe action, use the gear key or the X11 notification.</string>
+</resources>
